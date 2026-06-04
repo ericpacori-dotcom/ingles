@@ -1,23 +1,43 @@
 import React, { useState, useEffect } from 'react';
-import { ChevronLeft, Sparkles, X, Volume2, ChevronUp, Loader2 } from 'lucide-react';
+import { ChevronLeft, Sparkles, X, Volume2, Loader2, MessageCircle } from 'lucide-react';
 
-// --- EL TRUCO DE ORO: MEMORIA CACHÉ ---
-// Un "Map" es como un diccionario interno súper rápido. 
-// Al estar fuera del componente, no se borra aunque el usuario cambie de página, 
-// solo se borra si recarga la pestaña por completo.
-const wordCache = new Map();
+const wordCacheV2 = new Map();
+// --- LA CAJA FUERTE --- (Evita que el navegador corte el audio)
+let audioMemoria = []; 
 
 export default function ReaderScreen({ navigateTo, book, openWordDetail }) {
   const [selectedWordInfo, setSelectedWordInfo] = useState(null);
+  const [displayedScript, setDisplayedScript] = useState(""); 
   
   useEffect(() => {
     let timer;
     if (selectedWordInfo && !selectedWordInfo.isLoading) {
       timer = setTimeout(() => {
-        setSelectedWordInfo(null);
-      }, 8000); 
+        closeModal();
+      }, 15000); 
     }
-    return () => clearTimeout(timer); 
+    return () => {
+      clearTimeout(timer);
+      window.speechSynthesis.cancel();
+    };
+  }, [selectedWordInfo]);
+
+  useEffect(() => {
+    if (selectedWordInfo && !selectedWordInfo.isLoading && selectedWordInfo.audioScript) {
+      setDisplayedScript(""); 
+      let i = 0;
+      const script = selectedWordInfo.audioScript;
+      
+      const typingInterval = setInterval(() => {
+        setDisplayedScript(script.slice(0, i));
+        i++;
+        if (i > script.length) {
+          clearInterval(typingInterval);
+        }
+      }, 40); 
+
+      return () => clearInterval(typingInterval);
+    }
   }, [selectedWordInfo]);
 
   if (!book) {
@@ -27,34 +47,76 @@ export default function ReaderScreen({ navigateTo, book, openWordDetail }) {
 
   const textTokens = book.content.split(/(\b[a-zA-Z']+\b)/);
 
+  const closeModal = () => {
+    setSelectedWordInfo(null);
+    window.speechSynthesis.cancel(); 
+    audioMemoria = []; // Vaciamos la caja fuerte al cerrar
+  };
+
+  // --- SISTEMA DE AUDIO ANTI-CORTES ---
+  const playAudioSequence = (englishWord, spanishScript) => {
+    if (!('speechSynthesis' in window)) return;
+    
+    window.speechSynthesis.cancel(); 
+    audioMemoria = []; // Limpiamos audios anteriores
+
+    const engUtterance = new SpeechSynthesisUtterance(englishWord);
+    engUtterance.lang = 'en-US';
+    engUtterance.rate = 0.85;
+
+    const spaUtterance = new SpeechSynthesisUtterance(spanishScript);
+    spaUtterance.lang = 'es-MX'; 
+    spaUtterance.rate = 0.95;
+
+    const voices = window.speechSynthesis.getVoices();
+    const googleSpanish = voices.find(v => v.name.includes('Google') && v.lang.includes('es'));
+    if (googleSpanish) {
+      spaUtterance.voice = googleSpanish;
+    }
+
+    // TRUCO: Guardamos los audios en la memoria global para que el navegador no los elimine
+    audioMemoria.push(engUtterance);
+    audioMemoria.push(spaUtterance);
+
+    // Cuando termine el inglés...
+    engUtterance.onend = () => {
+      // Hacemos una pausa natural de 400 milisegundos antes del español
+      setTimeout(() => {
+        window.speechSynthesis.speak(spaUtterance);
+      }, 400); 
+    };
+
+    // Si el inglés falla por alguna razón, pasa directo al español
+    engUtterance.onerror = () => {
+      window.speechSynthesis.speak(spaUtterance);
+    };
+
+    // ¡Que comience el show!
+    window.speechSynthesis.speak(engUtterance);
+  };
+
   const handleWordClick = async (word) => {
     if (!/^[a-zA-Z']+$/.test(word)) return;
     
     const cleanWord = word.toLowerCase().trim();
-    
     setSelectedWordInfo({ original: word, isLoading: true });
-    playAudio(word);
-
-    // 1. REVISAR LA MEMORIA ANTES DE GASTAR LÍMITES DE GOOGLE
-    if (wordCache.has(cleanWord)) {
-      console.log(`⚡ ¡Memoria Caché usada para "${cleanWord}"! (0 tokens gastados)`);
-      const cachedData = wordCache.get(cleanWord);
+    
+    if (wordCacheV2.has(cleanWord)) {
+      const cachedData = wordCacheV2.get(cleanWord);
       
       setSelectedWordInfo({ 
         original: word,
         emoji: cachedData.emoji,
-        grammar: cachedData.grammar,
         translation: cachedData.translation,
-        definition: cachedData.definition,
-        example: cachedData.example,
-        exampleTranslation: cachedData.exampleTranslation,
+        pronunciation: cachedData.pronunciation,
+        audioScript: cachedData.audioScript,
         isLoading: false 
       });
       
-      return; // Detenemos la función aquí. ¡Respuesta instantánea!
+      playAudioSequence(word, cachedData.audioScript);
+      return; 
     }
 
-    // 2. SI LA PALABRA ES NUEVA, CONSULTAMOS A LA INTELIGENCIA ARTIFICIAL
     try {
       const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
       
@@ -63,18 +125,21 @@ export default function ReaderScreen({ navigateTo, book, openWordDetail }) {
       }
 
       const promptText = `
-        Eres un tutor de inglés ayudando con el "Libro de Mormón". Palabra: "${cleanWord}".
-        REGLAS DE VELOCIDAD: 
-        1. Todo 100% en ESPAÑOL.
-        2. Sé EXTREMADAMENTE BREVE (máximo 15 palabras en la definición).
-        Devuelve esto:
+        Eres un tutor de inglés muy amigable, cero técnico y muy coloquial. 
+        El usuario tocó la palabra: "${cleanWord}" en un texto.
+        
+        REGLAS:
+        1. Todo en ESPAÑOL natural.
+        2. "pronunciation": Escribe cómo se lee en español (ej. "gud" para good).
+        3. "audioScript": Crea un guion conversacional corto como un profesor amable. 
+           Ejemplo: "Se pronuncia 'gud'. Significa bueno o bien, y se usa para hablar de algo positivo."
+        
+        Devuelve estrictamente este JSON puro:
         {
           "emoji": "1 solo emoji",
-          "grammar": "Tipo de palabra en español",
-          "translation": "Traducción al español",
-          "definition": "Si es del Libro de Mormón (personaje/lugar), di brevemente quién/qué es. Si es normal, definición coloquial muy corta.",
-          "example": "Oración de ejemplo muy corta en inglés",
-          "exampleTranslation": "Traducción al español"
+          "translation": "Traducción principal",
+          "pronunciation": "Pronunciación figurada",
+          "audioScript": "El guion amigable"
         }
       `;
 
@@ -86,60 +151,43 @@ export default function ReaderScreen({ navigateTo, book, openWordDetail }) {
         body: JSON.stringify({
           contents: [{ parts: [{ text: promptText }] }],
           generationConfig: {
-            temperature: 0.2, 
+            temperature: 0.3,
             responseMimeType: "application/json" 
           }
         })
       });
 
-      if (!aiResponse.ok) {
-        const errorData = await aiResponse.json();
-        throw new Error(errorData.error?.message || "Fallo en la conexión a Gemini");
-      }
+      if (!aiResponse.ok) throw new Error("Fallo en la conexión");
 
       const aiData = await aiResponse.json();
       const textResponse = aiData.candidates[0].content.parts[0].text;
       const data = JSON.parse(textResponse);
 
-      // 3. GUARDAR LA RESPUESTA EN LA MEMORIA PARA LA PRÓXIMA VEZ
-      wordCache.set(cleanWord, data);
-      console.log(`🤖 "${cleanWord}" guardada en memoria caché para el futuro.`);
+      wordCacheV2.set(cleanWord, data);
 
       setSelectedWordInfo({ 
         original: word,
         emoji: data.emoji,
-        grammar: data.grammar,
         translation: data.translation,
-        definition: data.definition,
-        example: data.example,
-        exampleTranslation: data.exampleTranslation,
+        pronunciation: data.pronunciation,
+        audioScript: data.audioScript,
         isLoading: false 
       });
+
+      playAudioSequence(word, data.audioScript);
 
     } catch (error) {
       console.error("Error de IA:", error);
-      
+      const errorMsg = "Parece que nos quedamos sin internet. Revisa tu conexión y vuelve a intentarlo.";
       setSelectedWordInfo({ 
         original: word,
         emoji: '🛑',
-        grammar: 'Error de conexión',
-        translation: 'Sin respuesta',
-        definition: 'Hubo un problema de conexión con el tutor inteligente. Verifica tu internet.',
-        example: '',
-        exampleTranslation: '',
+        translation: 'Sin conexión',
+        pronunciation: 'Error',
+        audioScript: errorMsg,
         isLoading: false 
       });
-    }
-  };
-
-  const playAudio = (text) => {
-    if ('speechSynthesis' in window) {
-      const utterance = new SpeechSynthesisUtterance(text);
-      utterance.lang = 'en-US';
-      utterance.rate = 0.85; 
-      window.speechSynthesis.speak(utterance);
-    } else {
-      console.warn("Tu navegador no soporta Text-to-Speech");
+      playAudioSequence(word, errorMsg);
     }
   };
 
@@ -176,48 +224,37 @@ export default function ReaderScreen({ navigateTo, book, openWordDetail }) {
             return <span key={index}>{token}</span>;
           })}
         </p>
-        
-        <div className="bg-violet-50 border-l-4 border-[#8b5cf6] p-3 md:p-4 text-xs md:text-sm text-gray-600 mt-8 md:mt-12 rounded-r animate-fade-in-up delay-300 shadow-sm">
-          <strong>Tip de aprendizaje:</strong> Toca cualquier palabra o personaje para ver su contexto. Las palabras repetidas cargarán al instante.
-        </div>
-
-        <button 
-          onClick={() => navigateTo('library')}
-          className="mt-12 w-full py-4 bg-gray-100 text-gray-600 rounded-xl font-bold hover:bg-gray-200 transition-colors animate-fade-in-up delay-400"
-        >
-          Finalizar lectura
-        </button>
       </div>
 
       {selectedWordInfo && (
         <div 
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 backdrop-blur-xl animate-fade-in-up p-0 md:p-6" 
-          onClick={() => setSelectedWordInfo(null)}
+          onClick={closeModal}
         >
           <div 
-            className="relative w-full h-full md:w-[380px] md:h-[750px] bg-[#09090b] md:rounded-[40px] shadow-2xl flex flex-col overflow-hidden text-white animate-scale-in border-0 md:border-[6px] md:border-gray-800"
+            className="relative w-full h-full md:w-[380px] md:h-[650px] bg-[#09090b] md:rounded-[40px] shadow-2xl flex flex-col overflow-hidden text-white animate-scale-in border-0 md:border-[6px] md:border-gray-800"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="absolute top-2 md:top-4 left-2 right-2 flex gap-1 z-30">
-              <div className="h-1.5 md:h-2 bg-white/30 rounded-full flex-1 overflow-hidden shadow-[0_1px_3px_rgba(0,0,0,0.5)]">
+              <div className="h-1.5 md:h-2 bg-white/30 rounded-full flex-1 overflow-hidden">
                 {!selectedWordInfo.isLoading && (
-                   <div className="h-full bg-white rounded-full animate-story-progress" style={{ animationDuration: '8s' }}></div>
+                   <div className="h-full bg-white rounded-full animate-story-progress" style={{ animationDuration: '15s' }}></div>
                 )}
               </div>
             </div>
 
             <div className="absolute top-6 md:top-8 left-4 right-4 flex justify-between items-center z-20">
               <div className="flex items-center gap-3">
-                <div className="w-8 h-8 rounded-full bg-violet-600 flex items-center justify-center shadow-lg">
-                  <Sparkles className="w-4 h-4 text-white" />
+                <div className="w-8 h-8 rounded-full bg-violet-600 flex items-center justify-center shadow-[0_0_15px_rgba(139,92,246,0.5)]">
+                  <Volume2 className="w-4 h-4 text-white animate-pulse" />
                 </div>
                 <div>
-                  <h3 className="text-sm font-bold tracking-wide text-white leading-tight drop-shadow-md">Guía de Estudio</h3>
-                  <p className="text-[10px] text-violet-300 font-bold uppercase tracking-widest drop-shadow-md">Tutor Inteligente</p>
+                  <h3 className="text-sm font-bold tracking-wide text-white leading-tight">Tutor Activo</h3>
+                  <p className="text-[10px] text-violet-300 font-bold uppercase tracking-widest">Escuchando...</p>
                 </div>
               </div>
               <button 
-                onClick={() => setSelectedWordInfo(null)}
+                onClick={closeModal}
                 className="p-2 bg-black/40 rounded-full hover:bg-black/60 transition-colors backdrop-blur-md"
               >
                 <X className="w-5 h-5 text-white" />
@@ -227,60 +264,61 @@ export default function ReaderScreen({ navigateTo, book, openWordDetail }) {
             {selectedWordInfo.isLoading ? (
                <div className="flex-1 flex flex-col items-center justify-center p-6 relative mt-10">
                  <Loader2 className="w-12 h-12 text-violet-500 animate-spin mb-6" />
-                 <h2 className="text-2xl font-extrabold text-center text-white mb-2 tracking-tight drop-shadow-lg">
+                 <h2 className="text-2xl font-extrabold text-center text-white mb-2 tracking-tight">
                    {selectedWordInfo.original}
                  </h2>
-                 <p className="text-violet-300 text-sm tracking-widest font-bold animate-pulse uppercase">Analizando contexto...</p>
+                 <p className="text-violet-300 text-sm tracking-widest font-bold animate-pulse uppercase">Preparando explicación...</p>
                </div>
             ) : (
-               <div className="flex-1 flex flex-col items-center justify-start p-6 relative mt-20 overflow-y-auto pb-6 no-scrollbar">
+               <div className="flex-1 flex flex-col items-center justify-start p-6 relative mt-24 overflow-y-auto pb-6 no-scrollbar">
                   
-                  <div className="text-[70px] mb-2 leading-none animate-fade-in-up drop-shadow-[0_0_30px_rgba(255,255,255,0.2)]">
+                  <div className="text-[60px] mb-2 leading-none animate-fade-in-up drop-shadow-[0_0_30px_rgba(255,255,255,0.2)]">
                     {selectedWordInfo.emoji}
                   </div>
                   
-                  <h2 className="text-5xl font-extrabold text-center text-white mb-3 tracking-tight drop-shadow-lg break-words w-full">
+                  <h2 className="text-4xl font-extrabold text-center text-white mb-2 tracking-tight drop-shadow-lg">
                     {selectedWordInfo.original}
                   </h2>
 
-                  {selectedWordInfo.grammar && (
-                    <div className="px-3 py-1 bg-white/10 border border-white/20 rounded-full mb-6">
-                       <span className="text-xs text-gray-300 uppercase tracking-widest font-bold">{selectedWordInfo.grammar}</span>
-                    </div>
-                  )}
+                  <div className="px-4 py-1 bg-white/10 border border-white/20 rounded-full mb-6">
+                     <span className="text-xs text-gray-300 uppercase tracking-widest font-bold flex items-center gap-2">
+                       <Volume2 className="w-3 h-3" /> /{selectedWordInfo.pronunciation}/
+                     </span>
+                  </div>
                   
-                  <div className="bg-violet-600/40 border border-violet-400/50 px-6 py-2 rounded-2xl mb-4 backdrop-blur-md shadow-[0_0_20px_rgba(139,92,246,0.3)] w-full text-center">
-                    <p className="text-3xl text-violet-100 font-black tracking-wide capitalize drop-shadow-md">
+                  <div className="bg-violet-600/40 border border-violet-400/50 px-6 py-3 rounded-2xl mb-8 backdrop-blur-md shadow-[0_0_20px_rgba(139,92,246,0.3)] w-full text-center">
+                    <p className="text-2xl text-violet-100 font-black tracking-wide capitalize drop-shadow-md">
                       {selectedWordInfo.translation}
                     </p>
                   </div>
 
-                  <p className="text-sm text-gray-300 text-center font-medium mb-8 max-w-[95%] leading-relaxed">
-                    {selectedWordInfo.definition}
-                  </p>
+                  {/* CAJA DE SUBTÍTULOS ANIMADA */}
+                  <div className="w-full bg-[#18181b] rounded-2xl p-5 border border-gray-700 mt-auto relative shadow-inner">
+                    <div className="absolute -top-3 left-5 bg-violet-500 text-white text-[10px] font-black tracking-wider uppercase px-3 py-1 rounded-full flex items-center gap-1.5 shadow-lg">
+                      <MessageCircle className="w-3 h-3" /> El tutor dice
+                    </div>
+                    <p className="text-[16px] text-gray-200 font-medium leading-relaxed mt-2 italic min-h-[80px]">
+                      "{displayedScript}"<span className="animate-pulse">_</span>
+                    </p>
+                  </div>
 
                   <button 
-                    onClick={() => playAudio(selectedWordInfo.original)}
-                    className="w-16 h-16 mb-8 bg-white/10 backdrop-blur-lg border border-white/20 rounded-full flex items-center justify-center hover:bg-white/20 active:scale-90 transition-all duration-300 group shadow-[0_0_20px_rgba(255,255,255,0.05)]"
-                  >
-                    <Volume2 className="w-7 h-7 text-white group-hover:scale-110 transition-transform" />
-                  </button>
-
-                  {selectedWordInfo.example && (
-                    <div className="w-full bg-white/5 backdrop-blur-sm rounded-xl p-4 border border-white/10 mt-auto text-left">
-                      <p className="text-[10px] text-violet-400 font-bold uppercase tracking-widest mb-3 flex items-center gap-2">
-                        <Sparkles className="w-3 h-3" /> Ejemplo
-                      </p>
+                    onClick={() => {
+                      setDisplayedScript(""); 
+                      playAudioSequence(selectedWordInfo.original, selectedWordInfo.audioScript); 
                       
-                      <p className="text-[15px] text-white font-medium mb-2 leading-snug">
-                        {selectedWordInfo.exampleTranslation}
-                      </p>
-
-                      <p className="text-xs text-gray-400 italic leading-snug border-l-2 border-white/20 pl-2">
-                        "{selectedWordInfo.example}"
-                      </p>
-                    </div>
-                  )}
+                      let i = 0;
+                      const script = selectedWordInfo.audioScript;
+                      const typingInterval = setInterval(() => {
+                        setDisplayedScript(script.slice(0, i));
+                        i++;
+                        if (i > script.length) clearInterval(typingInterval);
+                      }, 40);
+                    }}
+                    className="mt-6 w-full py-3 bg-white/10 border border-white/20 text-white rounded-xl font-bold hover:bg-white/20 transition-colors flex items-center justify-center gap-2"
+                  >
+                    <Volume2 className="w-5 h-5" /> Repetir Explicación
+                  </button>
                </div>
             )}
           </div>

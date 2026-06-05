@@ -1,25 +1,28 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { ChevronLeft, Sparkles, X, Volume2, Loader2, MessageCircle } from 'lucide-react';
+import { doc, getDoc, setDoc } from "firebase/firestore";
+import { db } from "../firebase"; 
 
 const wordCacheV2 = new Map();
-// --- LA CAJA FUERTE --- (Evita que el navegador corte el audio)
 let audioMemoria = []; 
 
 export default function ReaderScreen({ navigateTo, book, openWordDetail }) {
   const [selectedWordInfo, setSelectedWordInfo] = useState(null);
   const [displayedScript, setDisplayedScript] = useState(""); 
+  const [playbackKey, setPlaybackKey] = useState(0); 
+  
+  // --- EL ESCUDO ASÍNCRONO ---
+  // Guarda la palabra exacta que se está procesando actualmente
+  const currentWordRef = useRef(null);
   
   useEffect(() => {
-    let timer;
+    let fallbackTimer;
     if (selectedWordInfo && !selectedWordInfo.isLoading) {
-      timer = setTimeout(() => {
+      fallbackTimer = setTimeout(() => {
         closeModal();
-      }, 15000); 
+      }, 30000); 
     }
-    return () => {
-      clearTimeout(timer);
-      window.speechSynthesis.cancel();
-    };
+    return () => clearTimeout(fallbackTimer);
   }, [selectedWordInfo]);
 
   useEffect(() => {
@@ -47,18 +50,26 @@ export default function ReaderScreen({ navigateTo, book, openWordDetail }) {
 
   const textTokens = book.content.split(/(\b[a-zA-Z']+\b)/);
 
-  const closeModal = () => {
-    setSelectedWordInfo(null);
+  const stopAndClearAudio = () => {
+    if (window.closeModalTimeout) clearTimeout(window.closeModalTimeout);
+    audioMemoria.forEach(u => {
+      u.onend = null;
+      u.onerror = null;
+    });
     window.speechSynthesis.cancel(); 
-    audioMemoria = []; // Vaciamos la caja fuerte al cerrar
+    audioMemoria = []; 
   };
 
-  // --- SISTEMA DE AUDIO ANTI-CORTES ---
+  const closeModal = () => {
+    currentWordRef.current = null; // Cancelamos cualquier proceso en segundo plano inmediatamente
+    stopAndClearAudio(); 
+    setSelectedWordInfo(null); 
+  };
+
   const playAudioSequence = (englishWord, spanishScript) => {
     if (!('speechSynthesis' in window)) return;
     
-    window.speechSynthesis.cancel(); 
-    audioMemoria = []; // Limpiamos audios anteriores
+    stopAndClearAudio(); 
 
     const engUtterance = new SpeechSynthesisUtterance(englishWord);
     engUtterance.lang = 'en-US';
@@ -74,24 +85,35 @@ export default function ReaderScreen({ navigateTo, book, openWordDetail }) {
       spaUtterance.voice = googleSpanish;
     }
 
-    // TRUCO: Guardamos los audios en la memoria global para que el navegador no los elimine
-    audioMemoria.push(engUtterance);
-    audioMemoria.push(spaUtterance);
+    audioMemoria.push(engUtterance, spaUtterance);
 
-    // Cuando termine el inglés...
     engUtterance.onend = () => {
-      // Hacemos una pausa natural de 400 milisegundos antes del español
       setTimeout(() => {
-        window.speechSynthesis.speak(spaUtterance);
+        // Doble verificación: que la ventana no se haya cerrado durante el audio en inglés
+        if (audioMemoria.length > 0) {
+          window.speechSynthesis.speak(spaUtterance);
+        }
       }, 400); 
     };
 
-    // Si el inglés falla por alguna razón, pasa directo al español
     engUtterance.onerror = () => {
-      window.speechSynthesis.speak(spaUtterance);
+      if (audioMemoria.length > 0) {
+        window.speechSynthesis.speak(spaUtterance);
+      }
     };
 
-    // ¡Que comience el show!
+    spaUtterance.onend = () => {
+      window.closeModalTimeout = setTimeout(() => {
+        closeModal();
+      }, 1500); 
+    };
+    
+    spaUtterance.onerror = () => {
+      window.closeModalTimeout = setTimeout(() => {
+        closeModal();
+      }, 1500);
+    };
+
     window.speechSynthesis.speak(engUtterance);
   };
 
@@ -99,47 +121,71 @@ export default function ReaderScreen({ navigateTo, book, openWordDetail }) {
     if (!/^[a-zA-Z']+$/.test(word)) return;
     
     const cleanWord = word.toLowerCase().trim();
-    setSelectedWordInfo({ original: word, isLoading: true });
     
+    stopAndClearAudio(); 
+    
+    // Registramos la palabra que se acaba de cliquear como la "activa"
+    currentWordRef.current = cleanWord;
+
+    setSelectedWordInfo({ original: word, isLoading: true });
+    setPlaybackKey(Date.now()); 
+    
+    // CAPA 1: RAM Cache
     if (wordCacheV2.has(cleanWord)) {
       const cachedData = wordCacheV2.get(cleanWord);
       
+      // Si el usuario ya cambió de palabra velozmente, abortamos
+      if (currentWordRef.current !== cleanWord) return;
+
       setSelectedWordInfo({ 
         original: word,
-        emoji: cachedData.emoji,
-        translation: cachedData.translation,
-        pronunciation: cachedData.pronunciation,
-        audioScript: cachedData.audioScript,
+        ...cachedData,
         isLoading: false 
       });
-      
       playAudioSequence(word, cachedData.audioScript);
       return; 
     }
 
     try {
-      const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
-      
-      if (!apiKey || apiKey.length < 15) {
-        throw new Error("Llave inválida"); 
+      // CAPA 2: FIREBASE Cloud Cache
+      const wordRef = doc(db, "diccionario", cleanWord);
+      const wordSnap = await getDoc(wordRef);
+
+      // ESCUDO: ¿Se cerró la ventana mientras Firebase respondía?
+      if (currentWordRef.current !== cleanWord) return;
+
+      if (wordSnap.exists()) {
+        const firebaseData = wordSnap.data();
+        wordCacheV2.set(cleanWord, firebaseData);
+
+        setSelectedWordInfo({ 
+          original: word,
+          ...firebaseData,
+          isLoading: false 
+        });
+        playAudioSequence(word, firebaseData.audioScript);
+        return; 
       }
 
+      // CAPA 3: GEMINI AI
+      const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
+      if (!apiKey || apiKey.length < 15) throw new Error("Llave inválida"); 
+
       const promptText = `
-        Eres un tutor de inglés muy amigable, cero técnico y muy coloquial. 
-        El usuario tocó la palabra: "${cleanWord}" en un texto.
+        Eres un tutor de inglés muy amigable y coloquial. El usuario tocó la palabra: "${cleanWord}".
         
-        REGLAS:
+        REGLAS ESTRICTAS:
         1. Todo en ESPAÑOL natural.
-        2. "pronunciation": Escribe cómo se lee en español (ej. "gud" para good).
-        3. "audioScript": Crea un guion conversacional corto como un profesor amable. 
-           Ejemplo: "Se pronuncia 'gud'. Significa bueno o bien, y se usa para hablar de algo positivo."
+        2. NUNCA saludes ni te presentes. PROHIBIDO decir "Hola", "Qué tal", "Soy tu tutor". Ve directo al grano.
+        3. "pronunciation": Escribe cómo se lee en español (ej. "gud" para good).
+        4. "audioScript": Inicia inmediatamente con la explicación. Ejemplo: "Se pronuncia 'gud'. Significa bueno o bien, y se usa para hablar de algo positivo."
         
         Devuelve estrictamente este JSON puro:
         {
           "emoji": "1 solo emoji",
           "translation": "Traducción principal",
           "pronunciation": "Pronunciación figurada",
-          "audioScript": "El guion amigable"
+          "audioScript": "El guion conversacional directo y sin saludos"
         }
       `;
 
@@ -151,11 +197,14 @@ export default function ReaderScreen({ navigateTo, book, openWordDetail }) {
         body: JSON.stringify({
           contents: [{ parts: [{ text: promptText }] }],
           generationConfig: {
-            temperature: 0.3,
+            temperature: 0.1,
             responseMimeType: "application/json" 
           }
         })
       });
+
+      // ESCUDO: ¿El usuario cerró o cambió de palabra mientras Gemini pensaba?
+      if (currentWordRef.current !== cleanWord) return;
 
       if (!aiResponse.ok) throw new Error("Fallo en la conexión");
 
@@ -163,28 +212,45 @@ export default function ReaderScreen({ navigateTo, book, openWordDetail }) {
       const textResponse = aiData.candidates[0].content.parts[0].text;
       const data = JSON.parse(textResponse);
 
-      wordCacheV2.set(cleanWord, data);
+      const estTime = Math.max(4, Math.ceil(data.audioScript.length / 13) + 2);
+      const finalData = { ...data, estimatedTime: estTime };
+
+      // --- ULTRA ESCUDO FINAL ANTES DE GUARDAR ---
+      // Si la palabra ya no es la activa, NO se guarda en RAM ni en Firebase. Se descarta.
+      if (currentWordRef.current !== cleanWord) return;
+
+      wordCacheV2.set(cleanWord, finalData);
+
+      // Ahora sí, guardamos en Firebase de forma 100% segura
+      try {
+        await setDoc(wordRef, finalData);
+        console.log(`✅ ¡Guardado en Firebase! La palabra "${cleanWord}" ahora es global.`);
+      } catch (fbError) {
+        console.warn("No se pudo guardar en Firebase:", fbError);
+      }
 
       setSelectedWordInfo({ 
         original: word,
-        emoji: data.emoji,
-        translation: data.translation,
-        pronunciation: data.pronunciation,
-        audioScript: data.audioScript,
+        ...finalData,
         isLoading: false 
       });
 
-      playAudioSequence(word, data.audioScript);
+      playAudioSequence(word, finalData.audioScript);
 
     } catch (error) {
-      console.error("Error de IA:", error);
+      // Si fue una cancelación del usuario, morimos en silencio sin romper la pantalla
+      if (currentWordRef.current !== cleanWord) return;
+
+      console.error("Error general:", error);
       const errorMsg = "Parece que nos quedamos sin internet. Revisa tu conexión y vuelve a intentarlo.";
+      
       setSelectedWordInfo({ 
         original: word,
         emoji: '🛑',
         translation: 'Sin conexión',
         pronunciation: 'Error',
         audioScript: errorMsg,
+        estimatedTime: 5,
         isLoading: false 
       });
       playAudioSequence(word, errorMsg);
@@ -193,7 +259,7 @@ export default function ReaderScreen({ navigateTo, book, openWordDetail }) {
 
   return (
     <div className="min-h-screen bg-[#fcfcfc] flex flex-col relative pb-24 md:pb-20">
-      <div className="bg-white/90 backdrop-blur-md border-b border-gray-100 px-2 py-2 md:px-4 md:py-3 flex items-center justify-between sticky top-0 z-10 shadow-sm animate-fade-in-up">
+      <div className="bg-white/90 backdrop-blur-md border-b border-gray-100 px-2 py-2 md:px-4 md:py-3 flex items-center justify-between sticky top-0 z-10 shadow-sm">
         <button onClick={() => navigateTo('library')} className="p-2 text-gray-500 hover:text-violet-600 rounded-full hover:bg-gray-100 hover:-translate-x-1 transition-all">
           <ChevronLeft className="w-6 h-6 md:w-6 md:h-6" />
         </button>
@@ -228,83 +294,76 @@ export default function ReaderScreen({ navigateTo, book, openWordDetail }) {
 
       {selectedWordInfo && (
         <div 
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 backdrop-blur-xl animate-fade-in-up p-0 md:p-6" 
+          className="fixed inset-0 z-50 flex items-center justify-center bg-gray-900/60 backdrop-blur-sm animate-fade-in-up p-4 md:p-6" 
           onClick={closeModal}
         >
           <div 
-            className="relative w-full h-full md:w-[380px] md:h-[650px] bg-[#09090b] md:rounded-[40px] shadow-2xl flex flex-col overflow-hidden text-white animate-scale-in border-0 md:border-[6px] md:border-gray-800"
+            className="relative w-full max-w-[380px] h-[85vh] max-h-[650px] bg-white rounded-3xl md:rounded-[40px] shadow-2xl flex flex-col overflow-hidden text-gray-800 animate-scale-in border border-gray-100"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="absolute top-2 md:top-4 left-2 right-2 flex gap-1 z-30">
-              <div className="h-1.5 md:h-2 bg-white/30 rounded-full flex-1 overflow-hidden">
+            <div className="absolute top-0 left-0 right-0 h-1.5 z-30 bg-violet-100/50">
                 {!selectedWordInfo.isLoading && (
-                   <div className="h-full bg-white rounded-full animate-story-progress" style={{ animationDuration: '15s' }}></div>
+                   <div 
+                      key={playbackKey} 
+                      className="h-full bg-violet-500 animate-story-progress rounded-r-full" 
+                      style={{ animationDuration: `${selectedWordInfo.estimatedTime}s` }}>
+                   </div>
                 )}
-              </div>
             </div>
 
-            <div className="absolute top-6 md:top-8 left-4 right-4 flex justify-between items-center z-20">
-              <div className="flex items-center gap-3">
-                <div className="w-8 h-8 rounded-full bg-violet-600 flex items-center justify-center shadow-[0_0_15px_rgba(139,92,246,0.5)]">
-                  <Volume2 className="w-4 h-4 text-white animate-pulse" />
-                </div>
-                <div>
-                  <h3 className="text-sm font-bold tracking-wide text-white leading-tight">Tutor Activo</h3>
-                  <p className="text-[10px] text-violet-300 font-bold uppercase tracking-widest">Escuchando...</p>
-                </div>
-              </div>
+            <div className="absolute top-5 left-5 right-5 flex justify-between items-center z-20">
+              <span className="text-xs text-violet-600 font-black tracking-widest uppercase">Traducción</span>
               <button 
                 onClick={closeModal}
-                className="p-2 bg-black/40 rounded-full hover:bg-black/60 transition-colors backdrop-blur-md"
+                className="p-1.5 bg-gray-100 rounded-full hover:bg-gray-200 transition-colors"
               >
-                <X className="w-5 h-5 text-white" />
+                <X className="w-5 h-5 text-gray-500" />
               </button>
             </div>
 
             {selectedWordInfo.isLoading ? (
                <div className="flex-1 flex flex-col items-center justify-center p-6 relative mt-10">
-                 <Loader2 className="w-12 h-12 text-violet-500 animate-spin mb-6" />
-                 <h2 className="text-2xl font-extrabold text-center text-white mb-2 tracking-tight">
+                 <Loader2 className="w-12 h-12 text-teal-500 animate-spin mb-6" />
+                 <h2 className="text-2xl font-extrabold text-center text-gray-800 mb-2 tracking-tight">
                    {selectedWordInfo.original}
                  </h2>
-                 <p className="text-violet-300 text-sm tracking-widest font-bold animate-pulse uppercase">Preparando explicación...</p>
+                 <p className="text-gray-500 text-sm tracking-widest font-bold animate-pulse uppercase">Preparando explicación...</p>
                </div>
             ) : (
-               <div className="flex-1 flex flex-col items-center justify-start p-6 relative mt-24 overflow-y-auto pb-6 no-scrollbar">
+               <div className="flex-1 flex flex-col items-center justify-start p-6 relative mt-16 overflow-y-auto pb-6 no-scrollbar">
                   
-                  <div className="text-[60px] mb-2 leading-none animate-fade-in-up drop-shadow-[0_0_30px_rgba(255,255,255,0.2)]">
+                  <div className="text-[60px] mb-2 leading-none text-center w-full">
                     {selectedWordInfo.emoji}
                   </div>
                   
-                  <h2 className="text-4xl font-extrabold text-center text-white mb-2 tracking-tight drop-shadow-lg">
+                  <h2 className="text-4xl font-extrabold text-center text-violet-700 mb-2 tracking-tight capitalize w-full">
                     {selectedWordInfo.original}
                   </h2>
 
-                  <div className="px-4 py-1 bg-white/10 border border-white/20 rounded-full mb-6">
-                     <span className="text-xs text-gray-300 uppercase tracking-widest font-bold flex items-center gap-2">
-                       <Volume2 className="w-3 h-3" /> /{selectedWordInfo.pronunciation}/
-                     </span>
+                  <div className="px-4 py-1.5 bg-teal-50 border border-teal-200 rounded-full mb-6 flex items-center gap-2 shadow-sm">
+                       <Volume2 className="w-4 h-4 text-teal-600" /> 
+                       <span className="text-sm text-teal-700 font-bold tracking-wide"> /{selectedWordInfo.pronunciation}/</span>
                   </div>
                   
-                  <div className="bg-violet-600/40 border border-violet-400/50 px-6 py-3 rounded-2xl mb-8 backdrop-blur-md shadow-[0_0_20px_rgba(139,92,246,0.3)] w-full text-center">
-                    <p className="text-2xl text-violet-100 font-black tracking-wide capitalize drop-shadow-md">
+                  <div className="bg-violet-50 border border-violet-200 px-6 py-4 rounded-2xl mb-8 w-full text-center shadow-sm">
+                    <p className="text-3xl text-violet-800 font-black tracking-wide capitalize">
                       {selectedWordInfo.translation}
                     </p>
                   </div>
 
-                  {/* CAJA DE SUBTÍTULOS ANIMADA */}
-                  <div className="w-full bg-[#18181b] rounded-2xl p-5 border border-gray-700 mt-auto relative shadow-inner">
-                    <div className="absolute -top-3 left-5 bg-violet-500 text-white text-[10px] font-black tracking-wider uppercase px-3 py-1 rounded-full flex items-center gap-1.5 shadow-lg">
-                      <MessageCircle className="w-3 h-3" /> El tutor dice
+                  <div className="w-full bg-gray-50 rounded-2xl p-5 mt-auto relative shadow-inner border border-gray-200">
+                    <div className="absolute -top-3 left-5 bg-violet-600 text-white text-[10px] font-black tracking-wider uppercase px-3 py-1 rounded-full flex items-center gap-1.5 shadow-lg">
+                      <MessageCircle className="w-3 h-3" /> Tu tutor dice
                     </div>
-                    <p className="text-[16px] text-gray-200 font-medium leading-relaxed mt-2 italic min-h-[80px]">
-                      "{displayedScript}"<span className="animate-pulse">_</span>
+                    <p className="text-[15px] text-gray-800 font-medium leading-relaxed mt-2 italic min-h-[80px]">
+                      "{displayedScript}"<span className="animate-pulse font-bold text-violet-500">_</span>
                     </p>
                   </div>
 
                   <button 
                     onClick={() => {
                       setDisplayedScript(""); 
+                      setPlaybackKey(Date.now()); 
                       playAudioSequence(selectedWordInfo.original, selectedWordInfo.audioScript); 
                       
                       let i = 0;
@@ -315,9 +374,9 @@ export default function ReaderScreen({ navigateTo, book, openWordDetail }) {
                         if (i > script.length) clearInterval(typingInterval);
                       }, 40);
                     }}
-                    className="mt-6 w-full py-3 bg-white/10 border border-white/20 text-white rounded-xl font-bold hover:bg-white/20 transition-colors flex items-center justify-center gap-2"
+                    className="mt-6 w-full py-3.5 bg-teal-500 text-white rounded-xl font-bold hover:bg-teal-600 transition-colors flex items-center justify-center gap-2 shadow-md text-sm"
                   >
-                    <Volume2 className="w-5 h-5" /> Repetir Explicación
+                    <Volume2 className="w-5 h-5" /> Escuchar de Nuevo
                   </button>
                </div>
             )}

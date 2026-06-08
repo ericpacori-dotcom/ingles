@@ -1,81 +1,225 @@
-import React from 'react';
-import { User, BookOpen, Volume2, Award, Database } from 'lucide-react';
-import { collection, addDoc } from "firebase/firestore";
-import { db } from "../firebase"; 
-import { mormonDatabase } from "../data/mormonData"; // Importamos los nuevos capítulos
+import React, { useEffect, useRef } from 'react';
+import { User } from 'lucide-react';
 
 export default function LandingPage({ navigateTo }) {
+  // --- REFERENCIAS PARA LA MASCOTA ANIMADA ---
+  const isJumpingRef = useRef(false);
+  const svgRef = useRef(null);
+  const bodyRef = useRef(null);
+  const mouthRef = useRef(null);
+  const pupilRefs = useRef([]);
 
-  const uploadToFirebase = async () => {
-    try {
-      alert("Subiendo capítulos del Libro de Mormón a Firebase. Por favor espera...");
-      for (const book of mormonDatabase) {
-        const { level, title, cover, description, content } = book;
-        await addDoc(collection(db, "libros"), {
-          level,
-          title,
-          cover,
-          description,
-          content
-        });
-      }
-      alert("¡Éxito! Los capítulos se inyectaron a tu base de datos.");
-    } catch (error) {
-      console.error("Error subiendo datos:", error);
-      alert("Hubo un error al subir. Revisa la consola.");
+  // --- LÓGICA DE MOVIMIENTO DE OJOS (Sigue el cursor/dedo) ---
+  useEffect(() => {
+    const handleMove = (clientX, clientY) => {
+      if (isJumpingRef.current || !svgRef.current) return;
+
+      const rect = svgRef.current.getBoundingClientRect();
+      const centerX = rect.left + rect.width / 2;
+      const centerY = rect.top + rect.height / 2;
+
+      const deltaX = clientX - centerX;
+      const deltaY = clientY - centerY;
+      const angle = Math.atan2(deltaY, deltaX);
+      const distance = Math.min(Math.sqrt(deltaX * deltaX + deltaY * deltaY), 200);
+
+      const maxOffset = 6;
+      const normalizedDistance = distance / 200;
+      const offsetX = Math.cos(angle) * maxOffset * normalizedDistance;
+      const offsetY = Math.sin(angle) * maxOffset * normalizedDistance;
+
+      pupilRefs.current.forEach(group => {
+        if (group) group.style.transform = `translate(${offsetX}px, ${offsetY}px)`;
+      });
+    };
+
+    const onMouseMove = (e) => handleMove(e.clientX, e.clientY);
+    const onTouchMove = (e) => {
+      if (e.touches.length > 0) handleMove(e.touches[0].clientX, e.touches[0].clientY);
+    };
+    const onMouseLeave = () => {
+      pupilRefs.current.forEach(group => {
+        if (group) group.style.transform = `translate(0px, 0px)`;
+      });
+    };
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('touchmove', onTouchMove);
+    window.addEventListener('mouseleave', onMouseLeave);
+
+    return () => {
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('touchmove', onTouchMove);
+      window.removeEventListener('mouseleave', onMouseLeave);
+    };
+  }, []);
+
+  // --- LÓGICA DEL SALTO AL HACER CLIC ---
+  const handleMascotClick = () => {
+    if (isJumpingRef.current) return;
+    isJumpingRef.current = true;
+
+    if (bodyRef.current && mouthRef.current) {
+      bodyRef.current.classList.remove('animate-float-mascot');
+      void bodyRef.current.offsetWidth; // Forzar reinicio de animación
+      bodyRef.current.style.animation = 'jumpMascot 0.6s ease-out';
+      
+      mouthRef.current.setAttribute('d', 'M180 235 Q 200 265 220 235');
+
+      pupilRefs.current.forEach(group => {
+        if (group) group.style.transform = `translate(0px, -5px)`;
+      });
+
+      setTimeout(() => {
+        if (bodyRef.current && mouthRef.current) {
+          bodyRef.current.style.animation = '';
+          bodyRef.current.classList.add('animate-float-mascot');
+          mouthRef.current.setAttribute('d', 'M185 240 Q 200 255 215 240');
+        }
+        isJumpingRef.current = false;
+      }, 600);
     }
   };
 
   return (
-    <div className="bg-[#f3f4f8] min-h-screen relative overflow-hidden">
-      <nav className="flex justify-between items-center px-4 md:px-8 py-3 md:py-5 bg-white shadow-sm relative z-10">
-        <div className="flex items-center gap-2">
-          <svg className="w-6 h-6 text-gray-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" /></svg>
-          <span className="font-bold text-xl text-violet-700 ml-4 hidden md:block">FluentSphere</span>
+    <div className="min-h-screen relative font-sans overflow-hidden">
+      
+      {/* ESTILOS CSS INYECTADOS PARA LA MASCOTA */}
+      <style>{`
+        @keyframes floatMascot {
+            0%, 100% { transform: translateY(0px); }
+            50% { transform: translateY(-15px); }
+        }
+        .animate-float-mascot {
+            animation: floatMascot 4s ease-in-out infinite;
+        }
+        @keyframes shadowScaleMascot {
+            0%, 100% { transform: scale(1); opacity: 0.15; }
+            50% { transform: scale(0.8); opacity: 0.08; }
+        }
+        .animate-shadow-mascot {
+            animation: shadowScaleMascot 4s ease-in-out infinite;
+            transform-origin: 200px 350px;
+        }
+        @keyframes blinkMascot {
+            0%, 46%, 48%, 100% { transform: scaleY(1); }
+            47% { transform: scaleY(0.1); }
+        }
+        .animate-blink-mascot {
+            animation: blinkMascot 5s infinite;
+            transform-origin: 200px 190px;
+        }
+        @keyframes jumpMascot {
+            0%, 100% { transform: translateY(0) scale(1); }
+            30% { transform: translateY(10px) scale(1.05, 0.95); }
+            60% { transform: translateY(-40px) scale(0.95, 1.05); }
+            80% { transform: translateY(5px) scale(1.02, 0.98); }
+        }
+        .pupil-group {
+            transition: transform 0.1s ease-out;
+        }
+        .mascot-mouth {
+            transition: d 0.3s ease;
+        }
+      `}</style>
+
+      {/* --- NAVEGACIÓN --- */}
+      <nav className="flex justify-between items-center px-4 md:px-8 py-6 relative z-10">
+        <div className="flex items-center gap-2 select-none cursor-pointer" onClick={() => navigateTo('home')}>
+          <div className="w-10 h-10 bg-[#FA8C7F] dark:bg-[#F19C83] rounded-xl flex items-center justify-center transform rotate-3 shadow-sm">
+            <span className="text-white dark:text-[#323435] font-black text-2xl transform -rotate-3">d</span>
+          </div>
+          <span className="font-black text-2xl tracking-tight text-gray-900 dark:text-[#EAE3D9]">
+            dili<span className="text-[#75A4A7] dark:text-[#F19C83]">ooo</span>
+          </span>
         </div>
-        <ul className="hidden md:flex gap-8 text-sm font-medium text-gray-500">
-          <li className="text-violet-600 cursor-pointer">Home</li>
-          <li className="cursor-pointer hover:text-violet-600">Courses</li>
-          <li className="cursor-pointer hover:text-violet-600">Services</li>
-          <li className="cursor-pointer hover:text-violet-600">Contact</li>
-          <li className="cursor-pointer hover:text-violet-600">Blog</li>
-        </ul>
+
         <div className="flex items-center gap-4">
-          <button onClick={() => navigateTo('login')} className="bg-[#8b5cf6] text-white px-4 md:px-5 py-2 rounded-full text-sm font-medium flex items-center gap-2 hover:bg-violet-600 transition shadow-lg shadow-violet-200">
-            <div className="bg-white rounded-full p-1 hidden sm:block"><User className="w-4 h-4 text-[#8b5cf6]" /></div>
-            Log In
+          <button onClick={() => navigateTo('login')} className="bg-gray-900 dark:bg-[#EAE3D9] text-white dark:text-[#323435] px-6 py-2.5 rounded-full text-sm font-bold flex items-center gap-2 hover:opacity-80 transition-opacity">
+            <User className="w-4 h-4" />
+            <span className="hidden sm:block">Ingresar</span>
           </button>
         </div>
       </nav>
 
-      <main className="max-w-7xl mx-auto px-4 md:px-8 pt-8 md:pt-16 pb-16 md:pb-24 grid md:grid-cols-2 gap-8 md:gap-12 items-center relative z-10">
-        <div className="absolute top-1/4 -left-16 w-32 h-64 border-[16px] border-white rounded-r-full hidden lg:block opacity-50 animate-fade-in-left delay-300"></div>
-        <div className="relative z-10 animate-fade-in-left">
-          <div className="flex items-center gap-2 mb-3 md:mb-4"><div className="w-1 h-4 bg-violet-600"></div><span className="uppercase text-[10px] md:text-xs font-bold text-gray-600 tracking-wider">About Us</span></div>
-          <h1 className="text-4xl sm:text-5xl lg:text-6xl font-extrabold text-[#1f2937] leading-[1.1] mb-4 md:mb-6">Best English <br /> <span className="text-[#8b5cf6]">Learning Center</span></h1>
-          <p className="text-gray-500 text-xs md:text-sm leading-relaxed mb-8 md:mb-10 max-w-md">Domina el inglés leyendo historias. Desde lo más básico y repetitivo hasta textos avanzados. Haz clic en cualquier palabra para traducir.</p>
+      {/* --- HERO SECTION --- */}
+      <main className="max-w-7xl mx-auto px-4 md:px-8 pt-4 md:pt-20 pb-16 grid md:grid-cols-2 gap-12 items-center relative z-10">
+        <div className="relative z-10 animate-fade-in-up">
           
-          <div className="flex flex-col sm:flex-row gap-4">
-            <button onClick={() => navigateTo('pricing')} className="bg-[#8b5cf6] text-white px-8 py-3 rounded-sm font-medium hover:bg-violet-600 transition-all duration-300 flex items-center justify-center gap-2 shadow-lg shadow-violet-200 hover:-translate-y-1"><div className="w-4 h-[2px] bg-white mr-2"></div> Start Reading</button>
-            
-            <button onClick={uploadToFirebase} className="bg-gray-800 text-white px-8 py-3 rounded-sm font-medium hover:bg-black transition-all duration-300 flex items-center justify-center gap-2 hover:-translate-y-1">
-              <Database className="w-5 h-5" /> Inyectar a Firebase
+          <h1 className="text-5xl sm:text-6xl font-black text-gray-900 dark:text-[#EAE3D9] leading-tight mb-6">
+            Domina el inglés <br />
+            <span className="text-[#FA8C7F] dark:text-[#F19C83]">leyendo historias.</span>
+          </h1>
+          
+          <p className="text-gray-600 dark:text-[#EAE3D9]/80 text-lg leading-relaxed mb-10 max-w-md font-medium">
+            Toca cualquier palabra que no conozcas y tu tutor personal de IA te la explicará al instante, en tu idioma y de forma amigable.
+          </p>
+          
+          <div className="flex flex-col sm:flex-row gap-4 z-20 relative">
+            <button onClick={() => navigateTo('library')} className="bg-[#FA8C7F] dark:bg-[#F19C83] text-white dark:text-[#323435] px-8 py-4 rounded-2xl font-bold text-lg hover:opacity-90 dark:hover:bg-[#BA6B41] transition-colors flex items-center justify-center shadow-md">
+              Comenzar a leer
             </button>
           </div>
         </div>
-        <div className="relative animate-fade-in-right delay-100">
-          <div className="absolute top-1/2 -left-12 transform -translate-y-1/2 w-32 h-32 bg-[#8b5cf6] rounded-full z-20 animate-scale-in delay-300"></div>
-          <div className="relative z-10 rounded-2xl overflow-hidden aspect-[4/5] sm:aspect-auto sm:h-[500px] shadow-2xl"><img src="https://images.unsplash.com/photo-1522202176988-66273c2fd55f?ixlib=rb-4.0.3&auto=format&fit=crop&w=800&q=80" alt="Estudiante" className="w-full h-full object-cover"/></div>
+
+        {/* --- SECCIÓN DE LA MASCOTA ANIMADA --- */}
+        <div className="relative animate-fade-in-up delay-100 mt-4 md:mt-0 flex flex-col justify-center items-center">
+
+          {/* Contenedor del SVG */}
+          <div 
+             className="relative w-full max-w-[380px] aspect-square cursor-pointer select-none" 
+             style={{ WebkitTapHighlightColor: 'transparent' }}
+             onClick={handleMascotClick}
+          >
+             <svg ref={svgRef} viewBox="0 0 400 400" width="100%" height="100%">
+                 {/* Sombra base */}
+                 <ellipse className="animate-shadow-mascot" cx="200" cy="350" rx="90" ry="12" fill="#1E293B" opacity="0.15" />
+                 
+                 <g ref={bodyRef} className="animate-float-mascot">
+                     {/* Pies (Turquesa oscuro) */}
+                     <g id="feet">
+                         <ellipse cx="150" cy="315" rx="25" ry="15" fill="#2F6666" />
+                         <ellipse cx="250" cy="315" rx="25" ry="15" fill="#2F6666" />
+                     </g>
+
+                     {/* Cuerpo (Turquesa principal) */}
+                     <path d="M100 200 C 100 100, 300 100, 300 200 C 300 290, 260 320, 200 320 C 140 320, 100 290, 100 200 Z" fill="#75A4A7" />
+                     
+                     {/* Sombra interna (Turquesa oscuro) */}
+                     <path d="M110 200 C 110 120, 290 120, 290 200 C 290 280, 250 305, 200 305 C 150 305, 110 280, 110 200 Z" fill="#2F6666" opacity="0.3"/>
+
+                     {/* Ojos y pupilas que siguen al ratón */}
+                     <g className="animate-blink-mascot">
+                         <circle cx="135" cy="190" r="22" fill="#FFFFFF" />
+                         <g className="pupil-group" ref={el => pupilRefs.current[0] = el}>
+                             <circle cx="135" cy="190" r="10" fill="#323435" />
+                             <circle cx="132" cy="186" r="3.5" fill="#FFFFFF" />
+                         </g>
+
+                         <circle cx="200" cy="190" r="22" fill="#FFFFFF" />
+                         <g className="pupil-group" ref={el => pupilRefs.current[1] = el}>
+                             <circle cx="200" cy="190" r="10" fill="#323435" />
+                             <circle cx="197" cy="186" r="3.5" fill="#FFFFFF" />
+                         </g>
+
+                         <circle cx="265" cy="190" r="22" fill="#FFFFFF" />
+                         <g className="pupil-group" ref={el => pupilRefs.current[2] = el}>
+                             <circle cx="265" cy="190" r="10" fill="#323435" />
+                             <circle cx="262" cy="186" r="3.5" fill="#FFFFFF" />
+                         </g>
+                     </g>
+
+                     {/* Boca dinámica */}
+                     <path ref={mouthRef} className="mascot-mouth" d="M185 240 Q 200 255 215 240" fill="none" stroke="#323435" strokeWidth="5" strokeLinecap="round" />
+                     
+                     {/* Mejillas (Coral/Salmón) */}
+                     <ellipse cx="110" cy="220" rx="12" ry="6" fill="#FA8C7F" opacity="0.8" />
+                     <ellipse cx="290" cy="220" rx="12" ry="6" fill="#FA8C7F" opacity="0.8" />
+                 </g>
+             </svg>
+          </div>
         </div>
       </main>
-
-      <div className="max-w-6xl mx-auto px-4 md:px-8 relative z-20 -mt-6 md:-mt-10 pb-16">
-        <div className="grid md:grid-cols-3 shadow-2xl rounded-xl overflow-hidden bg-white animate-fade-in-up delay-200">
-          <div className="p-5 md:p-8 border-b md:border-b-0 md:border-r border-gray-100 flex gap-4 bg-white"><div className="w-10 h-10 md:w-12 md:h-12 rounded-full bg-violet-100 flex items-center justify-center"><BookOpen className="w-5 h-5 md:w-6 md:h-6 text-[#8b5cf6]" /></div><div><h3 className="font-bold text-gray-800 text-sm mb-1">Aprende Leyendo</h3><p className="text-[11px] md:text-xs text-gray-400">Textos categorizados.</p></div></div>
-          <div className="p-5 md:p-8 bg-[#8b5cf6] text-white flex gap-4"><div className="w-10 h-10 md:w-12 md:h-12 rounded-full border border-white/40 flex items-center justify-center"><Volume2 className="w-5 h-5 md:w-6 md:h-6 text-white" /></div><div><h3 className="font-bold text-white text-sm mb-1">Audio Nativo</h3><p className="text-[11px] md:text-xs text-violet-100">Pronunciación exacta.</p></div></div>
-          <div className="p-5 md:p-8 flex gap-4 bg-white"><div className="w-10 h-10 md:w-12 md:h-12 rounded-full bg-violet-100 flex items-center justify-center"><Award className="w-5 h-5 md:w-6 md:h-6 text-[#8b5cf6]" /></div><div><h3 className="font-bold text-gray-800 text-sm mb-1">Mejora Continua</h3><p className="text-[11px] md:text-xs text-gray-400">Sube de nivel.</p></div></div>
-        </div>
-      </div>
     </div>
   );
 }

@@ -37,30 +37,75 @@ export default function ReaderScreen({ navigateTo, book, openWordDetail, isMuted
   const [savedParagraphIndex, setSavedParagraphIndex] = useState(null);
 
   const [customSelection, setCustomSelection] = useState({
-    isSelecting: false,
-    pIndex: null,
-    startIndex: null,
-    endIndex: null
+    isSelecting: false, pIndex: null, startIndex: null, endIndex: null
   });
 
   const currentWordRef = useRef(null);
   const isMutedRef = useRef(isMuted);
   const paragraphRefs = useRef([]);
-  const touchStartRef = useRef({ x: 0, y: 0, isScrolling: false });
+  const touchStartRef = useRef({ x: 0, y: 0, isScrolling: false, intentResolved: false });
+  const scrollTimeout = useRef(null); // NUEVO: Control para el auto-guardado
 
   useEffect(() => {
     isMutedRef.current = isMuted;
     if (isMuted) window.speechSynthesis.cancel();
   }, [isMuted]);
 
+  // NUEVO: Lógica mejorada para leer el progreso
   useEffect(() => {
     if (book && book.id) {
-      const lastReadIndex = localStorage.getItem(`diliooo_progress_${book.id}`);
-      if (lastReadIndex !== null) {
-        setSavedParagraphIndex(parseInt(lastReadIndex));
+      const savedVal = localStorage.getItem(`diliooo_progress_${book.id}`);
+      if (savedVal !== null) {
+        try {
+          const parsed = JSON.parse(savedVal);
+          setSavedParagraphIndex(parsed.pIndex);
+        } catch (e) {
+          setSavedParagraphIndex(parseInt(savedVal)); // Soporte para usuarios antiguos
+        }
       }
     }
   }, [book]);
+
+  const paragraphs = book ? book.content.split('\n').filter(p => p.trim() !== '') : [];
+
+  // NUEVO: Sistema de Auto-Guardado en Silencio al hacer Scroll
+  useEffect(() => {
+    if (!book) return;
+
+    const handleScroll = () => {
+      if (scrollTimeout.current) clearTimeout(scrollTimeout.current);
+      scrollTimeout.current = setTimeout(() => {
+        const elements = paragraphRefs.current;
+        let foundIndex = -1;
+        for (let i = 0; i < elements.length; i++) {
+          if (elements[i]) {
+            const rect = elements[i].getBoundingClientRect();
+            // Guarda el párrafo que esté pasando por la mitad superior de la pantalla
+            if (rect.top >= 0 && rect.top <= window.innerHeight * 0.6) {
+              foundIndex = i;
+              break;
+            }
+          }
+        }
+        
+        if (foundIndex !== -1 && paragraphs[foundIndex]) {
+          const snippetText = paragraphs[foundIndex].replace(/<[^>]*>?/gm, '');
+          const snippet = snippetText.substring(0, 50).trim() + '...';
+          const progressData = {
+            pIndex: foundIndex,
+            snippet,
+            title: book.chapterName || book.title,
+            bookData: book
+          };
+          localStorage.setItem(`diliooo_progress_${book.id}`, JSON.stringify(progressData));
+          localStorage.setItem('diliooo_last_read_v2', JSON.stringify(progressData)); // Global para el Inicio
+        }
+      }, 1000); // 1 segundo de pausa en el scroll para guardar
+    };
+
+    window.addEventListener('scroll', handleScroll);
+    return () => window.removeEventListener('scroll', handleScroll);
+  }, [book, paragraphs]);
   
   useEffect(() => {
     let fallbackTimer;
@@ -89,8 +134,6 @@ export default function ReaderScreen({ navigateTo, book, openWordDetail, isMuted
     return null;
   }
 
-  const paragraphs = book.content.split('\n').filter(p => p.trim() !== '');
-
   const stopAndClearAudio = () => {
     if (window.closeModalTimeout) clearTimeout(window.closeModalTimeout);
     audioMemoria.forEach(u => { u.onend = null; u.onerror = null; });
@@ -108,16 +151,21 @@ export default function ReaderScreen({ navigateTo, book, openWordDetail, isMuted
 
   const scrollLastReadParagraph = () => {
     if (savedParagraphIndex !== null && paragraphRefs.current[savedParagraphIndex]) {
-      paragraphRefs.current[savedParagraphIndex].scrollIntoView({
-        behavior: 'smooth',
-        block: 'center'
-      });
+      paragraphRefs.current[savedParagraphIndex].scrollIntoView({ behavior: 'smooth', block: 'center' });
       setSavedParagraphIndex(null);
     }
   };
 
+  // NUEVO: Guardado manual mejorado
   const saveReadingProgress = (pIndex) => {
-    localStorage.setItem(`diliooo_progress_${book.id}`, pIndex);
+    const snippetText = paragraphs[pIndex];
+    if (!snippetText) return;
+    const snippet = snippetText.substring(0, 50).trim() + '...';
+    const progressData = {
+      pIndex, snippet, title: book.chapterName || book.title, bookData: book
+    };
+    localStorage.setItem(`diliooo_progress_${book.id}`, JSON.stringify(progressData));
+    localStorage.setItem('diliooo_last_read_v2', JSON.stringify(progressData));
   };
 
   const playAudioSequence = (englishWord, spanishScript) => {
@@ -143,10 +191,9 @@ export default function ReaderScreen({ navigateTo, book, openWordDetail, isMuted
     window.speechSynthesis.speak(engUtterance);
   };
 
-  // --- LÓGICA DE SELECCIÓN TÁCTIL ---
   const handlePointerDown = (pIndex, wIndex, e) => {
     if (e.touches) {
-      touchStartRef.current = { x: e.touches[0].clientX, y: e.touches[0].clientY, isScrolling: false };
+      touchStartRef.current = { x: e.touches[0].clientX, y: e.touches[0].clientY, isScrolling: false, intentResolved: false };
     }
     setCustomSelection({ isSelecting: true, pIndex, startIndex: wIndex, endIndex: wIndex });
   };
@@ -159,13 +206,25 @@ export default function ReaderScreen({ navigateTo, book, openWordDetail, isMuted
 
   const handleTouchMove = (e) => {
     if (!customSelection.isSelecting) return;
+    if (!e.touches || e.touches.length === 0) return;
+
     const touch = e.touches[0];
-    
+    const deltaX = Math.abs(touch.clientX - touchStartRef.current.x);
     const deltaY = Math.abs(touch.clientY - touchStartRef.current.y);
-    if (deltaY > 20 && customSelection.startIndex === customSelection.endIndex) {
-      touchStartRef.current.isScrolling = true;
-      setCustomSelection({ isSelecting: false, pIndex: null, startIndex: null, endIndex: null });
-      return;
+    
+    if (!touchStartRef.current.intentResolved) {
+      if (deltaX > 8 || deltaY > 8) {
+        touchStartRef.current.intentResolved = true;
+        if (deltaY > deltaX * 1.5) {
+          touchStartRef.current.isScrolling = true;
+          setCustomSelection({ isSelecting: false, pIndex: null, startIndex: null, endIndex: null });
+          return;
+        } else {
+          touchStartRef.current.isScrolling = false;
+        }
+      } else {
+        return;
+      }
     }
 
     if (touchStartRef.current.isScrolling) return;
@@ -175,14 +234,16 @@ export default function ReaderScreen({ navigateTo, book, openWordDetail, isMuted
       const wIndex = parseInt(element.getAttribute('data-windex'));
       const pIndex = parseInt(element.getAttribute('data-pindex'));
       if (customSelection.pIndex === pIndex) {
-        setCustomSelection(prev => ({ ...prev, endIndex: wIndex }));
+        setCustomSelection(prev => {
+          if (prev.endIndex !== wIndex) return { ...prev, endIndex: wIndex };
+          return prev;
+        });
       }
     }
   };
 
   const endCustomSelection = async () => {
     if (!customSelection.isSelecting) return;
-    
     const { pIndex, startIndex, endIndex } = customSelection;
     setCustomSelection(prev => ({ ...prev, isSelecting: false }));
 
@@ -201,11 +262,7 @@ export default function ReaderScreen({ navigateTo, book, openWordDetail, isMuted
     }
 
     if (wordsCount === 0) return;
-
-    if (wordsCount > 15) {
-      alert("Selección muy larga. Máximo 15 palabras para una mejor traducción.");
-      return;
-    }
+    if (wordsCount > 15) { alert("Selección muy larga. Máximo 15 palabras para una mejor traducción."); return; }
 
     if (wordsCount > 1) {
       handlePhraseSubmit(selectedPhrase.trim(), pIndex, pTokens);
@@ -260,7 +317,6 @@ export default function ReaderScreen({ navigateTo, book, openWordDetail, isMuted
 
       setSelectedWordInfo({ original: word, ...finalContextData, isLoading: false });
       playAudioSequence(finalContextData.expression || finalContextData.original, finalContextData.audioScript);
-
     } catch (error) {
       if (currentWordRef.current !== cleanWord) return;
       const errorMsg = "Sin internet. Revisa tu conexión.";
@@ -313,7 +369,6 @@ export default function ReaderScreen({ navigateTo, book, openWordDetail, isMuted
 
       setSelectedWordInfo({ original: phraseText, ...finalContextData, isLoading: false });
       playAudioSequence(finalContextData.expression || phraseText, finalContextData.audioScript);
-
     } catch (error) {
       if (currentWordRef.current !== cleanPhrase) return;
       const errorMsg = "Sin internet. Revisa tu conexión.";
@@ -346,17 +401,16 @@ export default function ReaderScreen({ navigateTo, book, openWordDetail, isMuted
       await setDoc(summaryRef, { texto: generatedSummary });
       contextCache.set(cacheKey, generatedSummary);
       setPageContextInfo({ text: generatedSummary, isLoading: false });
-
     } catch (error) {
       setPageContextInfo({ text: "Lo siento, no pude cargar la explicación.", isLoading: false });
     }
   };
 
-  const isSelectionActive = customSelection.isSelecting && customSelection.startIndex !== customSelection.endIndex;
+  const isSelectionFrozen = customSelection.isSelecting && touchStartRef.current.intentResolved && !touchStartRef.current.isScrolling;
 
   return (
     <div 
-      className={`min-h-screen bg-[#fafafa] dark:bg-[#323435] transition-colors duration-300 flex flex-col relative pb-16 select-none ${isSelectionActive ? 'touch-none' : ''}`}
+      className={`min-h-screen bg-[#fafafa] dark:bg-[#323435] transition-colors duration-300 flex flex-col relative pb-16 select-none ${isSelectionFrozen ? 'touch-none' : ''}`}
       onMouseUp={endCustomSelection}
       onTouchEnd={endCustomSelection}
       onMouseLeave={endCustomSelection}
@@ -386,7 +440,6 @@ export default function ReaderScreen({ navigateTo, book, openWordDetail, isMuted
         </div>
       )}
 
-      {/* AQUÍ ESTÁ LA MAGIA PARA EVITAR QUE EL TEXTO SE CORTE (overflow-x-hidden, w-full, etc) */}
       <div className="w-full max-w-2xl mx-auto px-4 sm:px-5 py-8 md:py-12 text-lg md:text-xl leading-relaxed text-gray-800 dark:text-[#EAE3D9] font-serif space-y-6 md:space-y-8 mt-4 overflow-x-hidden">
         {paragraphs.map((paragraphText, pIndex) => {
           const paragraphTokens = paragraphText.split(/(\b[a-zA-Z']+\b)/);
@@ -397,7 +450,6 @@ export default function ReaderScreen({ navigateTo, book, openWordDetail, isMuted
               ref={el => paragraphRefs.current[pIndex] = el}
               className="w-full bg-white dark:bg-[#2a2b2c]/30 p-4 md:p-5 rounded-3xl border border-gray-200/60 dark:border-[#2F6666]/30 shadow-sm relative transition-all duration-300 hover:border-gray-300 dark:hover:border-[#2F6666]/80 overflow-hidden"
             >
-              {/* Le inyectamos overflowWrap 'anywhere' para forzar a que líneas rebeldes o guiones se rompan si no caben */}
               <p className="inline leading-[2.2] md:leading-loose tracking-wide break-words whitespace-pre-wrap" style={{ overflowWrap: 'anywhere' }}>
                 {paragraphTokens.map((token, index) => {
                   const isWord = /^[a-zA-Z']+$/.test(token);

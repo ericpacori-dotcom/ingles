@@ -1,5 +1,7 @@
 import { initializeApp } from "firebase/app";
 import { getFirestore } from "firebase/firestore";
+// NUEVO: Importamos las herramientas de Autenticación
+import { getAuth, GoogleAuthProvider } from "firebase/auth";
 
 // Las llaves de tu aplicación web
 const firebaseConfig = {
@@ -16,3 +18,7 @@ const app = initializeApp(firebaseConfig);
 
 // Inicializar y exportar la base de datos (Firestore)
 export const db = getFirestore(app);
+
+// NUEVO: Inicializar y exportar la Autenticación y el proveedor de Google
+export const auth = getAuth(app);
+export const googleProvider = new GoogleAuthProvider();

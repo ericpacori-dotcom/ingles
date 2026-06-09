@@ -7,6 +7,9 @@ import PricingScreen from './screens/PricingScreen';
 import SplashScreen from './screens/SplashScreen';
 import WordDetailScreen from './screens/WordDetailScreen';
 import AdminScreen from './screens/AdminScreen'; 
+// AÑADIMOS LA IMPORTACIÓN DEL PERFIL AQUÍ
+import ProfileScreen from './screens/ProfileScreen'; 
+
 import { Download, Moon, Sun, Volume2, VolumeX } from 'lucide-react';
 
 export default function App() {
@@ -151,6 +154,10 @@ export default function App() {
           />
         )}
         {currentView === 'pricing' && <PricingScreen navigateTo={navigateTo} />}
+        
+        {/* AÑADIMOS LA RUTA DEL PERFIL AQUÍ */}
+        {currentView === 'profile' && <ProfileScreen navigateTo={navigateTo} />}
+        
         {currentView === 'word-detail' && (
           <WordDetailScreen 
             navigateTo={navigateTo} 

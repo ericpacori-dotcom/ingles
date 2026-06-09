@@ -1,82 +1,109 @@
-import React from 'react';
-import { ChevronLeft, KeyRound, Mail, Sparkles } from 'lucide-react';
+import React, { useState } from 'react';
+import { X, Loader2 } from 'lucide-react';
+import { signInWithPopup } from "firebase/auth";
+import { auth, googleProvider, db } from "../firebase";
+import { doc, getDoc, setDoc } from "firebase/firestore";
 
 export default function LoginScreen({ navigateTo }) {
-  
-  const handleLoginSubmit = (e) => {
-    e.preventDefault();
-    navigateTo('library'); // Simulación funcional existente
+  const [isGoogleLoading, setIsGoogleLoading] = useState(false);
+
+  const handleGoogleLogin = async () => {
+    setIsGoogleLoading(true);
+    try {
+      // 1. Abre la ventana emergente de Google
+      const result = await signInWithPopup(auth, googleProvider);
+      const user = result.user;
+
+      // 2. Verificamos si el usuario ya existe en nuestra base de datos
+      const userRef = doc(db, "usuarios", user.uid);
+      const userSnap = await getDoc(userRef);
+
+      // 3. Si es un usuario nuevo, lo guardamos con isPremium en falso
+      if (!userSnap.exists()) {
+        await setDoc(userRef, {
+          uid: user.uid,
+          email: user.email,
+          name: user.displayName,
+          isPremium: false, 
+          createdAt: new Date()
+        });
+      }
+      
+      // 4. Lo mandamos a la biblioteca
+      navigateTo('library');
+    } catch (error) {
+      console.error("Error iniciando sesión con Google:", error);
+      alert("La ventana de inicio de sesión se cerró o hubo un error. Intenta nuevamente.");
+    } finally {
+      setIsGoogleLoading(false);
+    }
   };
 
   return (
-    <div className="min-h-[90vh] flex items-center justify-center p-4 animate-fade-in-up">
-      
-      {/* CONTENEDOR FLOTANTE TIPO MODAL DILIOOO (Perfecto para Celulares) */}
-      <div className="w-full max-w-[385px] h-auto bg-white rounded-3xl md:rounded-[40px] shadow-2xl border border-gray-100 p-6 md:p-8 flex flex-col relative overflow-hidden">
+    <div className="min-h-screen flex items-center justify-center bg-[#fafafa] dark:bg-[#323435] transition-colors duration-300 px-4 py-8">
+      <div className="bg-white dark:bg-[#2a2b2c] p-6 md:p-8 rounded-[32px] shadow-xl border border-gray-100 dark:border-[#2F6666]/50 w-full max-w-md animate-scale-in relative">
         
-        {/* Línea decorativa superior de marca */}
-        <div className="absolute top-0 left-0 right-0 h-1.5 bg-gradient-to-r from-violet-600 via-rose-400 to-teal-400"></div>
-
-        {/* Botón de Regresar */}
-        <button 
-          onClick={() => navigateTo('landing')} 
-          className="absolute top-5 left-5 p-2 bg-gray-50 hover:bg-gray-100 text-gray-500 rounded-full transition-all"
-        >
-          <ChevronLeft className="w-5 h-5" />
-        </button>
-
-        {/* LOGO DE MARCA EN EL LOGIN */}
-        <div className="flex flex-col items-center mt-6 mb-8 text-center">
-          <div className="w-14 h-14 bg-gradient-to-br from-violet-600 to-rose-400 rounded-2xl flex items-center justify-center shadow-xl shadow-violet-100 mb-3 transform rotate-3">
-            <span className="text-white font-black text-3xl transform -rotate-3">d</span>
-          </div>
-          <h2 className="text-2xl font-black text-gray-900 tracking-tight">Bienvenido a diliooo</h2>
-          <p className="text-xs text-gray-400 font-bold uppercase tracking-widest mt-1">Inicia sesión para continuar</p>
+        <div className="flex justify-between items-center mb-6 md:mb-8">
+          <h2 className="text-xl md:text-2xl font-black text-gray-900 dark:text-[#EAE3D9] tracking-tight">Bienvenido de nuevo</h2>
+          <button onClick={() => navigateTo('landing')} className="text-gray-400 dark:text-[#EAE3D9]/60 hover:text-[#FA8C7F] dark:hover:text-[#F19C83] transition-colors">
+            <X className="w-5 h-5 md:w-6 md:h-6" />
+          </button>
         </div>
 
-        {/* FORMULARIO ALTAMENTE ACCESIBLE */}
-        <form onSubmit={handleLoginSubmit} className="space-y-4 flex-1 flex flex-col justify-center">
-          
+        <form className="space-y-5" onSubmit={(e) => { e.preventDefault(); navigateTo('library'); }}>
           <div>
-            <label className="block text-xs font-black uppercase tracking-wider text-gray-500 mb-1.5 ml-1">Correo Electrónico</label>
-            <div className="relative">
-              <Mail className="absolute left-4 top-3.5 w-5 h-5 text-gray-400" />
-              <input 
-                type="email" 
-                placeholder="tu@correo.com" 
-                defaultValue="estudiante@diliooo.com" // Preservado para testing rápido
-                className="w-full bg-gray-50 border border-gray-200 rounded-xl py-3.5 pl-12 pr-4 text-sm font-semibold text-gray-800 placeholder-gray-400 focus:outline-none focus:border-violet-500 focus:bg-white transition-all shadow-inner"
-                required
-              />
-            </div>
+            <label className="block text-xs font-black uppercase tracking-wider text-gray-500 dark:text-[#EAE3D9]/70 mb-2">Email</label>
+            <input 
+              type="email" 
+              required 
+              className="w-full px-4 py-3.5 bg-gray-50 dark:bg-[#323435] border border-gray-200 dark:border-[#2F6666] rounded-2xl focus:ring-2 focus:ring-[#FA8C7F] dark:focus:ring-[#F19C83] focus:outline-none text-sm font-medium text-gray-900 dark:text-white transition-all" 
+              placeholder="tu@email.com" 
+            />
           </div>
-
           <div>
-            <label className="block text-xs font-black uppercase tracking-wider text-gray-500 mb-1.5 ml-1">Contraseña</label>
-            <div className="relative">
-              <KeyRound className="absolute left-4 top-3.5 w-5 h-5 text-gray-400" />
-              <input 
-                type="password" 
-                placeholder="••••••••" 
-                defaultValue="123456" // Preservado para testing rápido
-                className="w-full bg-gray-50 border border-gray-200 rounded-xl py-3.5 pl-12 pr-4 text-sm font-semibold text-gray-800 placeholder-gray-400 focus:outline-none focus:border-violet-500 focus:bg-white transition-all shadow-inner"
-                required
-              />
+            <label className="block text-xs font-black uppercase tracking-wider text-gray-500 dark:text-[#EAE3D9]/70 mb-2">Contraseña</label>
+            <input 
+              type="password" 
+              required 
+              className="w-full px-4 py-3.5 bg-gray-50 dark:bg-[#323435] border border-gray-200 dark:border-[#2F6666] rounded-2xl focus:ring-2 focus:ring-[#FA8C7F] dark:focus:ring-[#F19C83] focus:outline-none text-sm font-medium text-gray-900 dark:text-white transition-all" 
+              placeholder="••••••••" 
+            />
+          </div>
+          <button type="submit" className="w-full bg-[#75A4A7] dark:bg-[#F19C83] text-white dark:text-[#323435] py-4 rounded-2xl font-black uppercase tracking-wider hover:opacity-90 dark:hover:bg-[#BA6B41] transition-all duration-300 mt-2 shadow-md">
+            Iniciar Sesión
+          </button>
+        </form>
+
+        <div className="mt-8">
+          <div className="relative">
+            <div className="absolute inset-0 flex items-center">
+              <div className="w-full border-t border-gray-200 dark:border-[#2F6666]"></div>
+            </div>
+            <div className="relative flex justify-center text-xs">
+              <span className="px-4 bg-white dark:bg-[#2a2b2c] text-gray-400 dark:text-[#EAE3D9]/50 font-bold uppercase tracking-widest">O continúa con</span>
             </div>
           </div>
 
           <button 
-            type="submit"
-            className="w-full py-4 bg-gradient-to-r from-violet-600 to-violet-500 text-white font-black rounded-xl hover:shadow-lg hover:shadow-violet-200 hover:-translate-y-0.5 transition-all duration-300 flex items-center justify-center gap-2 shadow-md text-sm uppercase tracking-wider pt-4 mt-8"
+            type="button" 
+            onClick={handleGoogleLogin}
+            disabled={isGoogleLoading}
+            className={`mt-6 w-full flex items-center justify-center gap-3 bg-white dark:bg-[#323435] border border-gray-200 dark:border-[#2F6666] text-gray-700 dark:text-[#EAE3D9] py-3.5 rounded-2xl font-bold transition-all duration-300 shadow-sm
+              ${isGoogleLoading ? 'opacity-70 cursor-not-allowed' : 'hover:bg-gray-50 dark:hover:bg-[#2F6666]/50 hover:shadow-md'}`}
           >
-            <Sparkles className="w-4 h-4 text-rose-300" /> Ingresar con Éxito
+            {isGoogleLoading ? (
+              <Loader2 className="w-5 h-5 animate-spin text-gray-400 dark:text-[#F19C83]" />
+            ) : (
+              <img src="https://www.svgrepo.com/show/475656/google-color.svg" alt="Google" className="w-5 h-5" />
+            )}
+            <span>{isGoogleLoading ? "Conectando..." : "Google"}</span>
           </button>
-        </form>
+        </div>
 
-        {/* Footer amigable */}
-        <p className="text-center text-xs text-gray-400 font-medium mt-8">
-          ¿No tienes una cuenta? <span className="text-violet-600 font-bold hover:underline cursor-pointer">Regístrate</span>
+        <p className="text-center text-sm text-gray-500 dark:text-[#EAE3D9]/70 mt-8 font-medium">
+          ¿No tienes una cuenta? <span className="text-[#FA8C7F] dark:text-[#F19C83] font-black cursor-pointer hover:underline" onClick={() => navigateTo('pricing')}>Suscríbete aquí</span>
         </p>
+
       </div>
     </div>
   );
